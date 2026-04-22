@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local tiles</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    html, body { height: 100%; margin: 0; background: #0f1115; }
+    #err {
+      display: none; max-width: 520px; margin: 48px auto; padding: 20px 24px;
+      background: #2a1f18; color: #fec89a; border-radius: 8px; font: 14px/1.5 system-ui, sans-serif;
+    }
+    #layout { display: none; height: 100%; }
+    #controls {
+      flex: 0 0 232px; max-width: 92vw;
+      background: #1a1d24; color: #e8eaef;
+      font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+      padding: 18px 16px 24px; box-shadow: 4px 0 24px rgba(0,0,0,0.45);
+      overflow-y: auto; z-index: 2000;
+    }
+    .section-title {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: #8b93a7;
+      margin: 18px 0 10px; text-transform: uppercase;
+    }
+    .section-title:first-child { margin-top: 0; }
+    .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; cursor: pointer; }
+    .row span { color: #dce1ec; }
+    .row input {
+      appearance: none; width: 20px; height: 20px; margin: 0; flex-shrink: 0;
+      border: 2px solid #5c6370; border-radius: 50%; cursor: pointer;
+      background: transparent;
+    }
+    .row input:checked {
+      border-color: #fff; background: #fff;
+      box-shadow: inset 0 0 0 4px #1a1d24;
+    }
+    .row input:focus-visible { outline: 2px solid #6b9fff; outline-offset: 2px; }
+    #shallow-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    #shallow-val { font-size: 12px; font-weight: 600; color: #fff; letter-spacing: 0.02em; }
+    #shallow-range {
+      width: 100%; margin: 10px 0 4px; height: 6px; border-radius: 3px;
+      accent-color: #c8cdd8; cursor: pointer;
+    }
+    .range-ends {
+      display: flex; justify-content: space-between; font-size: 11px; color: #6b7280;
+      margin-bottom: 8px;
+    }
+    #no-tiles { font-size: 11px; color: #f59e0b; margin-top: 8px; line-height: 1.4; }
+    #map-wrap { flex: 1; position: relative; min-width: 0; }
+    #map { position: absolute; inset: 0; }
+    #err-pick { margin-top: 14px; }
+    #err-pick label { display: block; margin-bottom: 6px; color: #cbd5e1; font-size: 13px; }
+    #manifest-file { font-size: 13px; max-width: 100%; color: #e8eaef; }
+  </style>
+</head>
+<body>
+  <div id="err">
+    <div id="err-msg"></div>
+    <div id="err-pick">
+      <label for="manifest-file">Choose <code>manifest.json</code> (same folder as this page and your tile folders):</label>
+      <input type="file" id="manifest-file" accept=".json,application/json" />
+    </div>
+  </div>
+  <div id="layout">
+    <aside id="controls">
+      <div class="section-title">View</div>
+      <label class="row"><input type="radio" name="view" value="map" checked /><span>Map</span></label>
+      <label class="row"><input type="radio" name="view" value="heatmap" /><span>Heatmap</span></label>
+
+      <div class="section-title">Chart type</div>
+      <label class="row"><input type="radio" name="chart" value="nautical" checked /><span>Nautical charts</span></label>
+      <label class="row"><input type="radio" name="chart" value="sonar" /><span>SonarChart™ maps</span></label>
+
+      <div class="section-title">Seabed areas</div>
+      <label class="row"><input type="radio" name="seabed" value="show" checked /><span>Show</span></label>
+      <label class="row"><input type="radio" name="seabed" value="hide" /><span>Hide</span></label>
+
+      <div class="section-title">Depth units</div>
+      <label class="row"><input type="radio" name="depth" value="ft" /><span>Feet (ft)</span></label>
+      <label class="row"><input type="radio" name="depth" value="m" /><span>Meters (m)</span></label>
+      <label class="row"><input type="radio" name="depth" value="fath" checked /><span>Fathoms (fath)</span></label>
+
+      <div class="section-title" id="shallow-head">
+        <span>Shallow band</span>
+        <span id="shallow-val">10 m</span>
+      </div>
+      <input type="range" id="shallow-range" min="0" max="2" step="1" value="0" />
+      <div class="range-ends"><span id="shallow-min-label">10 m</span><span id="shallow-max-label">5.5 fath</span></div>
+      <p id="no-tiles" style="display:none;">No downloaded tiles match this combination. Pick another option or re-run the downloader with those variants.</p>
+    </aside>
+    <div id="map-wrap"><div id="map"></div></div>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+(function () {
+  function normalizeVariant(v) {
+    return {
+      slug: v.slug != null ? String(v.slug) : '',
+      label: v.label != null ? String(v.label) : '',
+      layer: String(v.layer),
+      du: String(v.du),
+      sd: String(v.sd),
+      sa: String(v.sa).toLowerCase(),
+      transparent: String(v.transparent).toLowerCase(),
+    };
+  }
+
+  function tileUrlTemplate(slug) {
+    var prefix = slug ? (slug + '/') : '';
+    return prefix + '{z}/{x}/{y}.png';
+  }
+
+  function readState() {
+    var view = document.querySelector('input[name="view"]:checked').value;
+    var transparent = view === 'heatmap' ? 'true' : 'false';
+    var chart = document.querySelector('input[name="chart"]:checked').value;
+    var layer = chart === 'nautical' ? '0' : '1';
+    var seabed = document.querySelector('input[name="seabed"]:checked').value;
+    var sa = seabed === 'show' ? 'true' : 'false';
+    var depth = document.querySelector('input[name="depth"]:checked').value;
+    var du = depth === 'ft' ? '2' : (depth === 'm' ? '1' : '3');
+    var shallow = parseFloat(document.getElementById('shallow-range').value);
+    return { transparent: transparent, layer: layer, sa: sa, du: du, shallow: shallow, depth: depth };
+  }
+
+  /** Suffix in tile folder slug, e.g. L0_du1_sd10_sa1_t1_sh_m10 → m10 */
+  function shallowTagFromSlug(slug) {
+    var m = String(slug).match(/_sh_(.+)$/);
+    return m ? m[1] : '';
+  }
+
+  var SHALLOW_ORDER = ['m10', 'ft33', 'fm55'];
+  var SHALLOW_LABEL = { m10: '10 m', ft33: '33 ft', fm55: '5.5 fath' };
+
+  /** One row per downloaded shading pack for this chart + seabed + transparency (ignores du). */
+  function orderedShallowVariants(st, ALL) {
+    var cands = ALL.filter(function (v) {
+      return v.transparent === st.transparent && v.layer === st.layer && v.sa === st.sa;
+    });
+    var out = [];
+    for (var t = 0; t < SHALLOW_ORDER.length; t++) {
+      var tag = SHALLOW_ORDER[t];
+      for (var i = 0; i < cands.length; i++) {
+        if (shallowTagFromSlug(cands[i].slug) === tag) {
+          out.push(cands[i]);
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  function setDepthUnitRadio(du, ignoreFlagHolder) {
+    var v = du === '2' ? 'ft' : (du === '1' ? 'm' : 'fath');
+    var el = document.querySelector('input[name="depth"][value="' + v + '"]');
+    if (!el || el.checked) return;
+    if (ignoreFlagHolder) ignoreFlagHolder.v = true;
+    try {
+      el.checked = true;
+    } finally {
+      if (ignoreFlagHolder) ignoreFlagHolder.v = false;
+    }
+  }
+
+  function startApp(manifest) {
+    if (!manifest.variants || !manifest.bbox) throw new Error('manifest missing variants or bbox');
+    var ALL = manifest.variants.map(normalizeVariant);
+    var zMin = manifest.zoom_min;
+    var zMax = manifest.zoom_max;
+    var bb = manifest.bbox;
+    var southWest = L.latLng(bb.south, bb.west);
+    var northEast = L.latLng(bb.north, bb.east);
+    var bounds = L.latLngBounds(southWest, northEast);
+    document.getElementById('layout').style.display = 'flex';
+    main(ALL, zMin, zMax, bounds);
+  }
+
+  function showLoadError(errEl, msg, showPicker) {
+    document.getElementById('err-msg').textContent = msg;
+    errEl.style.display = 'block';
+    document.getElementById('err-pick').style.display = showPicker ? 'block' : 'none';
+  }
+
+  function wireManifestFileInput(errEl) {
+    document.getElementById('manifest-file').addEventListener('change', function (ev) {
+      var f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        try {
+          var manifest = JSON.parse(reader.result);
+          errEl.style.display = 'none';
+          startApp(manifest);
+        } catch (e) {
+          showLoadError(errEl, 'Invalid JSON: ' + (e && e.message ? e.message : e), true);
+        }
+      };
+      reader.onerror = function () {
+        showLoadError(errEl, 'Could not read that file.', true);
+      };
+      reader.readAsText(f, 'UTF-8');
+    });
+  }
+
+  function main(ALL, zMin, zMax, bounds) {
+    var ignoreDepthRadio = { v: false };
+
+    var map = L.map('map', {
+      minZoom: zMin,
+      maxZoom: zMax,
+      maxBounds: bounds.pad(0.05),
+      maxBoundsViscosity: 0.85
+    });
+    map.fitBounds(bounds, { maxZoom: zMax });
+
+    var tileLayer = null;
+
+    function syncShallowSliderToData() {
+      var st = readState();
+      var ordered = orderedShallowVariants(st, ALL);
+      var r = document.getElementById('shallow-range');
+      var minLab = document.getElementById('shallow-min-label');
+      var maxLab = document.getElementById('shallow-max-label');
+      if (!ordered.length) {
+        r.min = '0';
+        r.max = '0';
+        r.value = '0';
+        r.disabled = true;
+        document.getElementById('shallow-val').textContent = '—';
+        if (minLab) minLab.textContent = '';
+        if (maxLab) maxLab.textContent = '';
+        return;
+      }
+      r.disabled = ordered.length <= 1;
+      r.min = '0';
+      r.max = String(Math.max(0, ordered.length - 1));
+      r.step = '1';
+      var idx = 0;
+      for (var j = 0; j < ordered.length; j++) {
+        if (ordered[j].du === st.du) {
+          idx = j;
+          break;
+        }
+      }
+      r.value = String(Math.min(ordered.length - 1, Math.max(0, idx)));
+      if (minLab) minLab.textContent = SHALLOW_LABEL[shallowTagFromSlug(ordered[0].slug)] || ordered[0].slug;
+      if (maxLab) maxLab.textContent = SHALLOW_LABEL[shallowTagFromSlug(ordered[ordered.length - 1].slug)] || ordered[ordered.length - 1].slug;
+      updateShallowPresetLabel(ALL);
+    }
+
+    function updateShallowPresetLabel(ALL) {
+      var st = readState();
+      var ordered = orderedShallowVariants(st, ALL);
+      var r = document.getElementById('shallow-range');
+      var idx = parseInt(r.value, 10);
+      if (isNaN(idx) || !ordered.length) return;
+      idx = Math.min(ordered.length - 1, Math.max(0, idx));
+      var tag = shallowTagFromSlug(ordered[idx].slug);
+      document.getElementById('shallow-val').textContent = SHALLOW_LABEL[tag] || tag;
+    }
+
+    function applyLayer() {
+      var st = readState();
+      var ordered = orderedShallowVariants(st, ALL);
+      var warn = document.getElementById('no-tiles');
+      if (!ordered.length) {
+        warn.style.display = 'block';
+        if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }
+        return;
+      }
+      var r = document.getElementById('shallow-range');
+      var idx = parseInt(r.value, 10);
+      if (isNaN(idx)) idx = 0;
+      idx = Math.min(ordered.length - 1, Math.max(0, idx));
+      var v = ordered[idx];
+      setDepthUnitRadio(v.du, ignoreDepthRadio);
+      warn.style.display = 'none';
+      var url = tileUrlTemplate(v.slug);
+      if (tileLayer) map.removeLayer(tileLayer);
+      tileLayer = L.tileLayer(url, {
+        minZoom: zMin,
+        maxZoom: zMax,
+        maxNativeZoom: zMax,
+        bounds: bounds,
+        tms: false,
+        noWrap: true
+      }).addTo(map);
+    }
+
+    function wireControls() {
+      document.querySelectorAll('#controls input[type=radio]').forEach(function (el) {
+        el.addEventListener('change', function () {
+          if (ignoreDepthRadio.v) return;
+          syncShallowSliderToData();
+          applyLayer();
+        });
+      });
+      document.getElementById('shallow-range').addEventListener('input', function () {
+        var st = readState();
+        var ordered = orderedShallowVariants(st, ALL);
+        var r = document.getElementById('shallow-range');
+        var idx = parseInt(r.value, 10);
+        if (!isNaN(idx) && ordered[idx]) setDepthUnitRadio(ordered[idx].du, ignoreDepthRadio);
+        updateShallowPresetLabel(ALL);
+        applyLayer();
+      });
+    }
+
+    if (ALL.length <= 1) {
+      document.getElementById('controls').style.display = 'none';
+      document.getElementById('map-wrap').style.flex = '1 1 100%';
+      L.tileLayer(tileUrlTemplate(ALL[0] ? ALL[0].slug : ''), {
+        minZoom: zMin, maxZoom: zMax, maxNativeZoom: zMax, bounds: bounds, tms: false, noWrap: true
+      }).addTo(map);
+    } else {
+      wireControls();
+      syncShallowSliderToData();
+      applyLayer();
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', function () {
+    var errEl = document.getElementById('err');
+    wireManifestFileInput(errEl);
+
+    if (window.location.protocol === 'file:') {
+      showLoadError(
+        errEl,
+        'Opened as a local file (file://). Browsers block automatic loading of manifest.json. ' +
+        'Use the file picker below, or open this page via a local server (same folder as tiles).',
+        true
+      );
+      return;
+    }
+
+    fetch('manifest.json')
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (manifest) {
+        startApp(manifest);
+      })
+      .catch(function (e) {
+        var msg = e && e.message ? e.message : String(e);
+        showLoadError(
+          errEl,
+          'Could not load manifest.json (' + msg + '). Put index.html next to manifest.json and your tile folders, ' +
+          'or choose manifest.json below. For a local server: python -m http.server 8765 in that folder.',
+          true
+        );
+      });
+  });
+})();
+  </script>
+</body>
+</html>

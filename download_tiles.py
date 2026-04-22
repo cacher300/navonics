@@ -17,15 +17,18 @@ Usage examples (PowerShell):
   python download_tiles.py --variants single --layer 1 --du 2 --sd 29 --sa true --transparent false ...
 
 Notes:
+  - Map UI is static `index.html` (loads `manifest.json` via HTTP or file-picker on file://). Copied into `--out` each run.
   - Respect Garmin / Navionics terms and rate limits; raise --delay or lower --workers if throttled.
   - JWTs expire; refresh NAVIONICS_* when requests start failing with 401/403.
   - Shallow (du, sd) presets are best-effort; confirm values in browser DevTools if tiles look wrong.
 """
 
 import argparse
+import itertools
 import json
 import math
 import os
+import shutil
 import re
 import sys
 import threading
@@ -39,7 +42,7 @@ import requests
 
 # Garmin Bearer + Navionics config JWT (expire; update when 401/403). Env vars override if set.
 DEFAULT_NAVIONICS_BEARER = (
-    "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjNDcyNmIxMC0yNjM3LTQ4ZjQtODY3NC1lZTk5NmI5NjE0MGUiLCJhdWQiOiJtYXBzLmdhcm1pbi5jb20iLCJpc3MiOiJnYXJtaW4uY29tIiwiZXhwIjoxNzc2ODc3MDUwLCJpYXQiOjE3NzY4Njk4NTB9.km5MqLkdmV__u4-bjcRKl8Vy7b8ONa2uaRnDuWWJROBELa-QZMGBR_errpHidqm-SZ0GN7KE8mL3fp12KY0TjGxzvgZxdA25PCBf7bttt1KfwwaVoIpl-Zu_S0GpYM7UykaY3T4l2B5jwsBhwjmi253VXwLpu-Cr4MLH9_woxMgvh2ywMtq4X6Eps1JAjdQIJW-IBiLm5vAPfWiaLbr1hDmXZ3Nx73zFD0jW0WafLe-BIf-CKF0ONI6nKUTCkfoDxybeTAixwtp-tDReInZjyOiqGZF6ItxvQQPSbTcaGD2Gji4V9zYEvqEPOKQZ6uneGiWy6zKvUWhufNuWsimfqw"
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjNDcyNmIxMC0yNjM3LTQ4ZjQtODY3NC1lZTk5NmI5NjE0MGUiLCJhdWQiOiJtYXBzLmdhcm1pbi5jb20iLCJpc3MiOiJnYXJtaW4uY29tIiwiZXhwIjoxNzc2ODg5NTEzLCJpYXQiOjE3NzY4ODIzMTN9.E78246bOMb_H3cB0CzaIok7-K6_G3_OGLGR7JkUS2GxuDMPHpPHI4k3kjTAi4z4T3_LZ93HtOXbKNZe1K1z4RYnXX3sPZb01q4qjtTKtjnuMTZZ9rps_MiA-NhWCINwZspjt4aWA1owj7qKlQIrv0mjbFdMQ3HIqtPlFX6dnTQJcxwO7zzTq3vePpVVUcRmnNVVQs9ICuP7SOsRaygJNjtZjKxBv6pH6smtbirhCOGSmloUK7yAutAqjjo2GOIDpD5P7xI8SO1mStlQqa8slFvqw-hWNR7VV3O_sAF22GbcGeIDxz6L65ebuX4D6rzW8Go0D0GTQOWN6uu2oCNcxGg"
 )
 DEFAULT_NAVIONICS_CONFIG = (
     "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJycG4iOiJpbnRlcm5hbF9zZXJ2aWNlIiwiYXByIjoiMDEwLUQyMTEyLTEwIn0.Ua7QtpbvTn16y9WDFnzUSiTCzjQbltqcBFAkiFv1PEY"
@@ -145,6 +148,18 @@ def iter_jobs(
         for x in range(xmin, xmax + 1):
             for y in range(ymin, ymax + 1):
                 yield z, x, y
+
+
+def count_tile_jobs(bbox: BBox, zoom_min: int, zoom_max: int) -> int:
+    """Count (z,x,y) jobs without storing them (saves huge RAM on big areas)."""
+    return sum(1 for _ in iter_jobs(bbox, zoom_min, zoom_max))
+
+
+def iter_download_tasks(bbox: BBox, zoom_min: int, zoom_max: int, variants):
+    """Same order as before: each variant, then every tile in bbox."""
+    for v in variants:
+        for z, x, y in iter_jobs(bbox, zoom_min, zoom_max):
+            yield v, z, x, y
 
 
 def extension_from_content_type(ct):
@@ -288,255 +303,13 @@ def write_manifest(
     (out_root / "manifest.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
-def write_leaflet_index(
-    out_root: Path,
-    bbox: BBox,
-    zoom_min: int,
-    zoom_max: int,
-    variants,
-) -> None:
-    west, south, east, north = bbox
-    vjson = json.dumps(
-        [
-            {
-                "slug": v["slug"],
-                "label": v["label"],
-                "layer": str(v["layer"]),
-                "du": str(v["du"]),
-                "sd": str(v["sd"]),
-                "sa": str(v["sa"]).lower(),
-                "transparent": str(v["transparent"]).lower(),
-            }
-            for v in variants
-        ],
-        ensure_ascii=True,
-    )
-    html = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Local tiles</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <style>
-    html, body {{ height: 100%; margin: 0; background: #0f1115; }}
-    #layout {{ display: flex; height: 100%; }}
-    #controls {{
-      flex: 0 0 232px; max-width: 92vw;
-      background: #1a1d24; color: #e8eaef;
-      font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
-      padding: 18px 16px 24px; box-shadow: 4px 0 24px rgba(0,0,0,0.45);
-      overflow-y: auto; z-index: 2000;
-    }}
-    .section-title {{
-      font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: #8b93a7;
-      margin: 18px 0 10px; text-transform: uppercase;
-    }}
-    .section-title:first-child {{ margin-top: 0; }}
-    .row {{ display: flex; align-items: center; gap: 10px; margin: 8px 0; cursor: pointer; }}
-    .row span {{ color: #dce1ec; }}
-    .row input {{
-      appearance: none; width: 20px; height: 20px; margin: 0; flex-shrink: 0;
-      border: 2px solid #5c6370; border-radius: 50%; cursor: pointer;
-      background: transparent;
-    }}
-    .row input:checked {{
-      border-color: #fff; background: #fff;
-      box-shadow: inset 0 0 0 4px #1a1d24;
-    }}
-    .row input:focus-visible {{ outline: 2px solid #6b9fff; outline-offset: 2px; }}
-    #shallow-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }}
-    #shallow-val {{ font-size: 12px; font-weight: 600; color: #fff; letter-spacing: 0.02em; }}
-    #shallow-range {{
-      width: 100%; margin: 10px 0 4px; height: 6px; border-radius: 3px;
-      accent-color: #c8cdd8; cursor: pointer;
-    }}
-    .range-ends {{
-      display: flex; justify-content: space-between; font-size: 11px; color: #6b7280;
-      margin-bottom: 8px;
-    }}
-    #no-tiles {{
-      font-size: 11px; color: #f59e0b; margin-top: 8px; line-height: 1.4;
-    }}
-    #map-wrap {{ flex: 1; position: relative; min-width: 0; }}
-    #map {{ position: absolute; inset: 0; }}
-  </style>
-</head>
-<body>
-  <div id="layout">
-    <aside id="controls">
-      <div class="section-title">View</div>
-      <label class="row"><input type="radio" name="view" value="map" checked /><span>Map</span></label>
-      <label class="row"><input type="radio" name="view" value="heatmap" /><span>Heatmap</span></label>
-
-      <div class="section-title">Chart type</div>
-      <label class="row"><input type="radio" name="chart" value="nautical" checked /><span>Nautical charts</span></label>
-      <label class="row"><input type="radio" name="chart" value="sonar" /><span>SonarChart™ maps</span></label>
-
-      <div class="section-title">Seabed areas</div>
-      <label class="row"><input type="radio" name="seabed" value="show" checked /><span>Show</span></label>
-      <label class="row"><input type="radio" name="seabed" value="hide" /><span>Hide</span></label>
-
-      <div class="section-title">Depth units</div>
-      <label class="row"><input type="radio" name="depth" value="ft" /><span>Feet (ft)</span></label>
-      <label class="row"><input type="radio" name="depth" value="m" /><span>Meters (m)</span></label>
-      <label class="row"><input type="radio" name="depth" value="fath" checked /><span>Fathoms (fath)</span></label>
-
-      <div class="section-title" id="shallow-head">
-        <span>Shallow shading</span>
-        <span id="shallow-val">3 FTH</span>
-      </div>
-      <input type="range" id="shallow-range" min="0" max="5.5" step="0.1" value="3" />
-      <div class="range-ends"><span>0</span><span id="shallow-max-label">5.5</span></div>
-      <p id="no-tiles" style="display:none;">No downloaded tiles match this combination. Pick another option or re-run the downloader with those variants.</p>
-    </aside>
-    <div id="map-wrap"><div id="map"></div></div>
-  </div>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script>
-    const ALL = {vjson};
-    const zMin = {zoom_min};
-    const zMax = {zoom_max};
-    const southWest = L.latLng({south}, {west});
-    const northEast = L.latLng({north}, {east});
-    const bounds = L.latLngBounds(southWest, northEast);
-
-    const map = L.map('map', {{
-      minZoom: zMin,
-      maxZoom: zMax,
-      maxBounds: bounds.pad(0.05),
-      maxBoundsViscosity: 0.85
-    }});
-    map.fitBounds(bounds, {{ maxZoom: zMax }});
-
-    function tileUrlTemplate(slug) {{
-      const prefix = slug ? (slug + '/') : '';
-      return prefix + '{{z}}/{{x}}/{{y}}.png';
-    }}
-
-    function readState() {{
-      const view = document.querySelector('input[name="view"]:checked').value;
-      const transparent = view === 'heatmap' ? 'true' : 'false';
-      const chart = document.querySelector('input[name="chart"]:checked').value;
-      const layer = chart === 'nautical' ? '0' : '1';
-      const seabed = document.querySelector('input[name="seabed"]:checked').value;
-      const sa = seabed === 'show' ? 'true' : 'false';
-      const depth = document.querySelector('input[name="depth"]:checked').value;
-      const du = depth === 'ft' ? '2' : (depth === 'm' ? '1' : '3');
-      const shallow = parseFloat(document.getElementById('shallow-range').value);
-      return {{ transparent, layer, sa, du, shallow, depth }};
-    }}
-
-    function filterVariants(st) {{
-      return ALL.filter(function (v) {{
-        return v.transparent === st.transparent && v.layer === st.layer && v.sa === st.sa && v.du === st.du;
-      }});
-    }}
-
-    function pickVariant(st) {{
-      const f = filterVariants(st);
-      if (!f.length) return null;
-      const t = st.shallow;
-      let best = f[0];
-      let bestD = Math.abs(parseFloat(best.sd, 10) - t);
-      for (let i = 1; i < f.length; i++) {{
-        const d = Math.abs(parseFloat(f[i].sd, 10) - t);
-        if (d < bestD) {{ bestD = d; best = f[i]; }}
-      }}
-      return best;
-    }}
-
-    function depthAxis(du) {{
-      if (du === '1') return {{ min: 0, max: 10, step: 0.5, suffix: ' M', decimals: 1 }};
-      if (du === '2') return {{ min: 0, max: 33, step: 1, suffix: ' FT', decimals: 0 }};
-      return {{ min: 0, max: 5.5, step: 0.1, suffix: ' FTH', decimals: 1 }};
-    }}
-
-    function syncShallowSliderToData() {{
-      const st = readState();
-      const f = filterVariants(st);
-      const ax = depthAxis(st.du);
-      const r = document.getElementById('shallow-range');
-      r.min = String(ax.min);
-      r.max = String(ax.max);
-      r.step = String(ax.step);
-      document.getElementById('shallow-max-label').textContent = String(ax.max);
-      let v = parseFloat(r.value, 10);
-      if (isNaN(v) || v < ax.min || v > ax.max) v = Math.min(ax.max, Math.max(ax.min, (ax.min + ax.max) / 2));
-      if (f.length) {{
-        const sds = f.map(function (x) {{ return parseFloat(x.sd, 10); }}).sort(function (a,b) {{ return a-b; }});
-        const mid = sds[Math.floor(sds.length / 2)];
-        if (sds.indexOf(v) < 0) v = mid;
-      }}
-      r.value = String(v);
-      updateShallowLabel();
-    }}
-
-    function updateShallowLabel() {{
-      const st = readState();
-      const ax = depthAxis(st.du);
-      const v = parseFloat(document.getElementById('shallow-range').value, 10);
-      const dec = ax.decimals;
-      const num = dec ? v.toFixed(dec) : String(Math.round(v));
-      document.getElementById('shallow-val').textContent = num + ax.suffix.trim();
-    }}
-
-    let tileLayer = null;
-
-    function applyLayer() {{
-      const st = readState();
-      const v = pickVariant(st);
-      const warn = document.getElementById('no-tiles');
-      if (!v) {{
-        warn.style.display = 'block';
-        if (tileLayer) {{ map.removeLayer(tileLayer); tileLayer = null; }}
-        return;
-      }}
-      warn.style.display = 'none';
-      const url = tileUrlTemplate(v.slug);
-      if (tileLayer) map.removeLayer(tileLayer);
-      tileLayer = L.tileLayer(url, {{
-        minZoom: zMin,
-        maxZoom: zMax,
-        maxNativeZoom: zMax,
-        bounds: bounds,
-        tms: false,
-        noWrap: true
-      }}).addTo(map);
-    }}
-
-    function wireControls() {{
-      document.querySelectorAll('#controls input[type=radio]').forEach(function (el) {{
-        el.addEventListener('change', function () {{
-          syncShallowSliderToData();
-          applyLayer();
-        }});
-      }});
-      document.getElementById('shallow-range').addEventListener('input', function () {{
-        updateShallowLabel();
-      }});
-      document.getElementById('shallow-range').addEventListener('change', applyLayer);
-    }}
-
-    if (ALL.length <= 1) {{
-      document.getElementById('controls').style.display = 'none';
-      document.getElementById('layout').style.display = 'block';
-      document.getElementById('map-wrap').style.height = '100%';
-      let tileLayer0 = L.tileLayer(tileUrlTemplate(ALL[0] ? ALL[0].slug : ''), {{
-        minZoom: zMin, maxZoom: zMax, maxNativeZoom: zMax, bounds: bounds, tms: false, noWrap: true
-      }}).addTo(map);
-    }} else {{
-      wireControls();
-      syncShallowSliderToData();
-      applyLayer();
-    }}
-  </script>
-</body>
-</html>
-"""
-    (out_root / "index.html").write_text(html, encoding="utf-8")
+def copy_tile_index(out_root: Path) -> None:
+    """Copy static index.html (tile viewer) next to this script into out_root."""
+    src = Path(__file__).resolve().parent / "index.html"
+    if src.is_file():
+        shutil.copy2(src, out_root / "index.html")
+    else:
+        print("warning: index.html not found next to download_tiles.py", file=sys.stderr)
 
 
 def main() -> int:
@@ -606,7 +379,7 @@ def main() -> int:
         print("Missing tokens: set NAVIONICS_* env vars or DEFAULT_* in download_tiles.py.", file=sys.stderr)
         return 2
 
-    jobs = list(iter_jobs(bbox, args.zoom_min, args.zoom_max))
+    n_tiles = count_tile_jobs(bbox, args.zoom_min, args.zoom_max)
     if args.variants == "all":
         variants = build_variant_matrix()
     else:
@@ -629,14 +402,14 @@ def main() -> int:
             },
         )
 
-    total_requests = len(jobs) * len(variants)
+    total_requests = n_tiles * len(variants)
     print(
-        f"Tiles: {len(jobs)}  variants: {len(variants)}  total GETs (approx): {total_requests} "
+        f"Tiles: {n_tiles}  variants: {len(variants)}  total GETs (approx): {total_requests} "
         "(existing files skipped per variant folder)"
     )
     if args.dry_run:
         print("bbox:", bbox)
-        for j in jobs[:3]:
+        for j in itertools.islice(iter_jobs(bbox, args.zoom_min, args.zoom_max), 3):
             print(" sample tile:", j)
         for v in variants[:4]:
             print(" sample variant:", v.get("slug") or "(root)", v.get("label", ""))
@@ -646,7 +419,7 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     write_manifest(args.out, bbox, args.zoom_min, args.zoom_max, variants)
-    write_leaflet_index(args.out, bbox, args.zoom_min, args.zoom_max, variants)
+    copy_tile_index(args.out)
 
     session = requests.Session()
     session.headers["Authorization"] = f"Bearer {bearer}"
@@ -674,20 +447,35 @@ def main() -> int:
     dl = TileDownloader(session, url_builder, args.out, args.referer, args.origin, args.delay, lock)
 
     workers = max(1, args.workers)
+    # Keep only a small number of futures in memory (was: submit millions at once → huge RAM + slow start).
+    max_in_flight = min(total_requests, max(workers * 8, 32))
+    task_it = iter(iter_download_tasks(bbox, args.zoom_min, args.zoom_max, variants))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        pending = {
-            ex.submit(dl.fetch_one, v, z, x, y) for v in variants for z, x, y in jobs
-        }
-        total = len(pending)
+        pending = set()
         done = 0
+
+        def submit_next():
+            try:
+                v, z, x, y = next(task_it)
+            except StopIteration:
+                return False
+            pending.add(ex.submit(dl.fetch_one, v, z, x, y))
+            return True
+
+        while len(pending) < max_in_flight:
+            if not submit_next():
+                break
+
         while pending:
             finished, pending = wait(pending, return_when=FIRST_COMPLETED)
             done += len(finished)
-            if done % 200 == 0 or done == total:
-                print(f"progress {done}/{total}  stats={dl.stats}")
+            for _ in finished:
+                submit_next()
+            if done % 200 == 0 or done == total_requests:
+                print(f"progress {done}/{total_requests}  stats={dl.stats}")
 
     print("done:", dl.stats)
-    print("Open a static server in the output folder and visit index.html, e.g.:")
+    print("Edit index.html beside download_tiles.py; each run copies it to --out.")
     print(f"  cd {args.out.resolve()}")
     print("  python -m http.server 8765")
     print("  http://127.0.0.1:8765/index.html")
