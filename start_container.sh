@@ -8,8 +8,9 @@ MARGIN="${MARGIN:-4}"
 ZOOM_MAX="${ZOOM_MAX:-16}"
 ZOOM_MIN="${ZOOM_MIN:-0}"
 OUT_DIR="${OUT_DIR:-./tiles_store}"
-WORKERS="${WORKERS:-4}"
-DELAY="${DELAY:-0.05}"
+WORKERS="${WORKERS:-2}"
+DELAY="${DELAY:-0.20}"
+DELAY_JITTER="${DELAY_JITTER:-0.20}"
 
 docker build -t "$IMAGE_NAME" .
 
@@ -25,4 +26,5 @@ docker run --rm -it \
   --zoom-max "$ZOOM_MAX" \
   --out "$OUT_DIR" \
   --workers "$WORKERS" \
-  --delay "$DELAY"
+  --delay "$DELAY" \
+  --delay-jitter "$DELAY_JITTER"

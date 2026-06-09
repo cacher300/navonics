@@ -19,16 +19,19 @@ Usage examples (PowerShell):
 Notes:
   - Map UI is static `index.html` (loads `manifest.json` via HTTP or file-picker on file://). Copied into `--out` each run.
   - Respect Garmin / Navionics terms and rate limits; raise --delay or lower --workers if throttled.
-  - JWTs expire; use --auto-refresh-tokens to refresh and retry when requests return 401/403.
+  - JWTs expire; automatic refresh retries 401s and refreshes before JWT expiry.
   - Reruns resume automatically: existing tile image files are skipped.
   - Shallow (du, sd) presets are best-effort; confirm values in browser DevTools if tiles look wrong.
 """
 
 import argparse
+import base64
+import datetime as dt
 import itertools
 import json
 import math
 import os
+import random
 import shutil
 import re
 import subprocess
@@ -50,6 +53,22 @@ DEFAULT_NAVIONICS_CONFIG = (
 DEFAULT_TOKEN_CACHE = Path(".navionics_tokens.json")
 
 BBox = Tuple[float, float, float, float]  # west, south, east, north
+
+
+def decode_jwt_payload(token: str) -> dict:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except Exception:
+        return {}
+
+
+def iso_from_epoch(value: int) -> str:
+    return dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
+
 
 # Shallow shading: (folder_tag, du, sd). du/sd are Navionics query values; literal 10/33/5.5 may not
 # match sd integers — tune from maps.garmin.com Network tab if a preset 404s or looks wrong.
@@ -212,6 +231,7 @@ class TileDownloader:
         referer: str,
         origin: str,
         delay_s: float,
+        delay_jitter_s: float,
         lock: threading.Lock,
         token_manager,
         auth_retries: int,
@@ -222,10 +242,24 @@ class TileDownloader:
         self.referer = referer
         self.origin = origin
         self.delay_s = delay_s
+        self.delay_jitter_s = max(0.0, delay_jitter_s)
         self.lock = lock
+        self.throttle_lock = threading.Lock()
+        self.next_request_at = 0.0
         self.token_manager = token_manager
         self.auth_retries = max(0, auth_retries)
-        self.stats = {"ok": 0, "skip": 0, "fail": 0, "retry": 0, "auth_refresh": 0}
+        self.stats = {"ok": 0, "skip": 0, "forbidden": 0, "fail": 0, "retry": 0, "auth_refresh": 0}
+
+    def wait_for_rate_limit_slot(self) -> None:
+        delay = max(0.0, self.delay_s) + random.uniform(0.0, self.delay_jitter_s)
+        if delay <= 0:
+            return
+        with self.throttle_lock:
+            now = time.monotonic()
+            wait_s = max(0.0, self.next_request_at - now)
+            self.next_request_at = max(now, self.next_request_at) + delay
+        if wait_s > 0:
+            time.sleep(wait_s)
 
     def fetch_one(self, variant: dict, z: int, x: int, y: int) -> None:
         url = self.url_builder(z, x, y, variant)
@@ -257,13 +291,26 @@ class TileDownloader:
 
         r = None
         for attempt in range(self.auth_retries + 1):
-            if self.delay_s > 0:
-                time.sleep(self.delay_s)
+            self.wait_for_rate_limit_slot()
+
+            if self.token_manager.bearer_expires_soon():
+                refreshed, launched_refresh = self.token_manager.refresh(
+                    self.session,
+                    "Bearer is close to expiry",
+                )
+                if refreshed:
+                    with self.lock:
+                        if launched_refresh:
+                            self.stats["auth_refresh"] += 1
+                else:
+                    break
 
             token_version = self.token_manager.version
             url = self.url_builder(z, x, y, variant)
             r = self.session.get(url, headers=headers, timeout=60)
-            if r.status_code not in (401, 403):
+            if r.status_code == 403 and not self.token_manager.bearer_expires_soon():
+                break
+            if r.status_code != 401 and r.status_code != 403:
                 break
             if attempt >= self.auth_retries:
                 break
@@ -278,6 +325,12 @@ class TileDownloader:
         if r is None:
             with self.lock:
                 self.stats["fail"] += 1
+            return
+        if r.status_code == 403:
+            with self.lock:
+                self.stats["forbidden"] += 1
+            tag = slug or "default"
+            sys.stderr.write(f"[forbidden] {tag} z={z} x={x} y={y} status=403\n")
             return
         if r.status_code != 200:
             with self.lock:
@@ -375,6 +428,7 @@ class TokenManager:
         cache_path: Path,
         refresh_headless: bool,
         refresh_wait_s: float,
+        refresh_before_expiry_s: int,
         auto_refresh: bool,
     ) -> None:
         self.bearer = bearer
@@ -382,6 +436,7 @@ class TokenManager:
         self.cache_path = cache_path
         self.refresh_headless = refresh_headless
         self.refresh_wait_s = refresh_wait_s
+        self.refresh_before_expiry_s = refresh_before_expiry_s
         self.auto_refresh = auto_refresh
         self.lock = threading.Lock()
         self.version = 0
@@ -389,14 +444,22 @@ class TokenManager:
     def apply_to_session(self, session: requests.Session) -> None:
         session.headers["Authorization"] = f"Bearer {self.bearer}"
 
-    def refresh_after_auth_failure(self, session: requests.Session, seen_version: int) -> Tuple[bool, bool]:
+    def bearer_expiry(self) -> int:
+        payload = decode_jwt_payload(self.bearer)
+        exp = payload.get("exp")
+        return exp if isinstance(exp, int) else 0
+
+    def bearer_expires_soon(self) -> bool:
+        exp = self.bearer_expiry()
+        if not exp:
+            return False
+        return exp <= int(time.time()) + self.refresh_before_expiry_s
+
+    def refresh(self, session: requests.Session, reason: str) -> Tuple[bool, bool]:
         if not self.auto_refresh:
             return False, False
         with self.lock:
-            if self.version != seen_version:
-                self.apply_to_session(session)
-                return True, False
-            print("Authorization failed; refreshing Garmin/Navionics token with Selenium...", file=sys.stderr)
+            print(f"{reason}; refreshing Garmin/Navionics token with Selenium...", file=sys.stderr)
             try:
                 refresh_token_cache(self.cache_path, self.refresh_headless, self.refresh_wait_s)
                 bearer, config = load_token_cache(self.cache_path)
@@ -413,7 +476,19 @@ class TokenManager:
             self.config = config
             self.version += 1
             self.apply_to_session(session)
+            exp = self.bearer_expiry()
+            if exp:
+                print(f"bearer usable until {iso_from_epoch(exp)}", file=sys.stderr)
             return True, True
+
+    def refresh_after_auth_failure(self, session: requests.Session, seen_version: int) -> Tuple[bool, bool]:
+        if not self.auto_refresh:
+            return False, False
+        with self.lock:
+            if self.version != seen_version:
+                self.apply_to_session(session)
+                return True, False
+        return self.refresh(session, "Authorization failed")
 
 
 def main() -> int:
@@ -444,8 +519,14 @@ def main() -> int:
     p.add_argument(
         "--delay",
         type=float,
-        default=0.05,
-        help="Seconds to sleep before each GET (default 0). Increase (e.g. 0.05) if the server throttles you.",
+        default=0.15,
+        help="Minimum seconds between request starts across all workers.",
+    )
+    p.add_argument(
+        "--delay-jitter",
+        type=float,
+        default=0.15,
+        help="Extra random seconds added to --delay for each request.",
     )
     p.add_argument("--referer", default="https://maps.garmin.com/")
     p.add_argument("--origin", default="https://maps.garmin.com")
@@ -480,7 +561,7 @@ def main() -> int:
     p.add_argument(
         "--no-auto-refresh-tokens",
         action="store_true",
-        help="Disable automatic Selenium refresh on missing tokens or 401/403 responses.",
+        help="Disable automatic Selenium refresh on missing tokens, 401s, or near-expiry JWTs.",
     )
     p.add_argument(
         "--refresh-headless",
@@ -494,10 +575,16 @@ def main() -> int:
         help="Seconds to wait for maps.garmin.com during --refresh-tokens.",
     )
     p.add_argument(
+        "--refresh-before-expiry",
+        type=int,
+        default=300,
+        help="Refresh JWT this many seconds before its exp timestamp.",
+    )
+    p.add_argument(
         "--auth-retries",
         type=int,
         default=2,
-        help="Retries per tile after refreshing tokens for 401/403 responses.",
+        help="Retries per tile after refreshing tokens for auth failures.",
     )
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
@@ -593,6 +680,7 @@ def main() -> int:
         cache_path=args.token_cache,
         refresh_headless=args.refresh_headless,
         refresh_wait_s=args.refresh_wait,
+        refresh_before_expiry_s=args.refresh_before_expiry,
         auto_refresh=auto_refresh_tokens,
     )
     token_manager.apply_to_session(session)
@@ -624,6 +712,7 @@ def main() -> int:
         args.referer,
         args.origin,
         args.delay,
+        args.delay_jitter,
         lock,
         token_manager,
         args.auth_retries,
