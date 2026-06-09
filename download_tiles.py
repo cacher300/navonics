@@ -480,14 +480,30 @@ class TileDownloader:
             if r.status_code == 429:
                 with self.lock:
                     self.stats["rate_limited"] += 1
-                break
+                if attempt >= self.auth_retries:
+                    break
+                refreshed, launched_refresh = self.token_manager.refresh(
+                    self.session,
+                    "Rate limit hit",
+                )
+                if not refreshed:
+                    break
+                with self.lock:
+                    self.stats["retry"] += 1
+                    if launched_refresh:
+                        self.stats["auth_refresh"] += 1
+                continue
             if r.status_code == 403 and not self.token_manager.bearer_expires_soon():
                 break
             if r.status_code != 401 and r.status_code != 403:
                 break
             if attempt >= self.auth_retries:
                 break
-            refreshed, launched_refresh = self.token_manager.refresh_after_auth_failure(self.session, token_version)
+            refreshed, launched_refresh = self.token_manager.refresh_after_failure(
+                self.session,
+                token_version,
+                "Authorization failed",
+            )
             if not refreshed:
                 break
             with self.lock:
@@ -656,14 +672,14 @@ class TokenManager:
                 print(f"bearer usable until {iso_from_epoch(exp)}", file=sys.stderr)
             return True, True
 
-    def refresh_after_auth_failure(self, session: requests.Session, seen_version: int) -> Tuple[bool, bool]:
+    def refresh_after_failure(self, session: requests.Session, seen_version: int, reason: str) -> Tuple[bool, bool]:
         if not self.auto_refresh:
             return False, False
         with self.lock:
             if self.version != seen_version:
                 self.apply_to_session(session)
                 return True, False
-        return self.refresh(session, "Authorization failed")
+        return self.refresh(session, reason)
 
 
 def main() -> int:

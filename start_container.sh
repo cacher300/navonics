@@ -28,6 +28,7 @@ docker run --rm -it \
   -w /app \
   "$IMAGE_NAME" \
   --refresh-headless \
+  --refresh-tokens \
   --bbox "$WEST" "$SOUTH" "$EAST" "$NORTH" \
   --zoom-min "$ZOOM_MIN" \
   --zoom-max "$ZOOM_MAX" \
