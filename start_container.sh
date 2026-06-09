@@ -14,11 +14,13 @@ WORKERS="${WORKERS:-2}"
 DELAY="${DELAY:-0.01}"
 DELAY_JITTER="${DELAY_JITTER:-0.00}"
 DEDUPE_REPORT_INTERVAL="${DEDUPE_REPORT_INTERVAL:-60}"
+AUTH_RETRIES="${AUTH_RETRIES:-8}"
 
 echo "Downloading whole-world bbox: $WEST $SOUTH $EAST $NORTH"
 echo "Zoom range: $ZOOM_MIN-$ZOOM_MAX."
+echo "Mode: sonar only, feet only, 10 ft shallow shading."
 
-docker build -t "$IMAGE_NAME" .
+docker build --no-cache -t "$IMAGE_NAME" .
 
 docker run --rm -it \
   --shm-size=1g \
@@ -33,4 +35,5 @@ docker run --rm -it \
   --workers "$WORKERS" \
   --delay "$DELAY" \
   --delay-jitter "$DELAY_JITTER" \
-  --dedupe-report-interval "$DEDUPE_REPORT_INTERVAL"
+  --dedupe-report-interval "$DEDUPE_REPORT_INTERVAL" \
+  --auth-retries "$AUTH_RETRIES"

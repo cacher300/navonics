@@ -102,10 +102,12 @@ def build_variant_matrix():
 def lonlat_to_tile(lon: float, lat: float, zoom: int) -> Tuple[int, int]:
     """Web Mercator XYZ tile indices (OSM / Google style, y grows toward south)."""
     n = 2**zoom
+    lon = min(180.0 - 1e-12, max(-180.0, lon))
+    lat = min(85.05112878, max(-85.05112878, lat))
     x = int((lon + 180.0) / 360.0 * n)
     lat_rad = math.radians(lat)
     y = int((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
-    return x, y
+    return min(n - 1, max(0, x)), min(n - 1, max(0, y))
 
 
 def bbox_to_xy_range(bbox: BBox, zoom: int) -> Tuple[int, int, int, int]:
@@ -411,6 +413,7 @@ class TileDownloader:
             "cache_copy": 0,
             "skip": 0,
             "forbidden": 0,
+            "rate_limited": 0,
             "fail": 0,
             "retry": 0,
             "auth_refresh": 0,
@@ -474,6 +477,19 @@ class TileDownloader:
             token_version = self.token_manager.version
             url = self.url_builder(z, x, y, variant)
             r = self.session.get(url, headers=headers, timeout=60)
+            if r.status_code == 429:
+                with self.lock:
+                    self.stats["rate_limited"] += 1
+                    self.stats["retry"] += 1
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait_s = float(retry_after) if retry_after else 0.0
+                except ValueError:
+                    wait_s = 0.0
+                if wait_s <= 0:
+                    wait_s = min(60.0, 2.0 * (2**attempt)) + random.uniform(0.0, 1.0)
+                time.sleep(wait_s)
+                continue
             if r.status_code == 403 and not self.token_manager.bearer_expires_soon():
                 break
             if r.status_code != 401 and r.status_code != 403:
