@@ -10,7 +10,7 @@ Tokens:
 Usage examples (PowerShell):
   python download_tiles.py --bbox -5.2 35.8 10.1 45.2 --zoom-min 10 --zoom-max 16 --out ./tiles_store
 
-  # Default: download every combination (nautical/sonar x seabed x transparent x 3 shallow bands).
+  # Default: download nautical/sonar x feet shallow bands.
   python download_tiles.py --refresh-tokens --anchor-tile 16/18322/24033 --margin 4 --zoom-min 16 --zoom-max 16 --out ./tiles_store
 
   # Single set of query params (legacy flat z/x/y under --out):
@@ -70,43 +70,33 @@ def iso_from_epoch(value: int) -> str:
     return dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
 
 
-# Shallow shading: (folder_tag, du, sd). du/sd are Navionics query values; literal 10/33/5.5 may not
-# match sd integers — tune from maps.garmin.com Network tab if a preset 404s or looks wrong.
-# layer 0 = nautical charts, 1 = SonarChart-style (per Garmin/Navionics viewer).
+# Feet-only shallow shading presets. du=2 is feet.
 SHALLOW_SHADING_PRESETS = (
-    ("sh_m10", "1", "10"),  # 0–10 m band (metric shallow shading)
-    ("sh_ft33", "2", "33"),  # 0–33 ft
-    ("sh_fm55", "3", "11"),  # 0–5.5 fathoms (du=3 fathoms; sd heuristic — edit if needed)
+    ("sh_ft10", "2", "10"),  # 0-10 ft
+    ("sh_ft33", "2", "33"),  # 0-33 ft
+    ("sh_ft100", "2", "100"),  # 0-100 ft
 )
 
 
 def build_variant_matrix():
-    """All combinations: 2 layers x 2 sa x 2 transparent x len(SHALLOW_SHADING_PRESETS)."""
+    """Default combinations: nautical/sonar x feet shallow presets."""
     out = []
     for sh_tag, du, sd in SHALLOW_SHADING_PRESETS:
         for layer in ("0", "1"):
-            for sa in ("true", "false"):
-                for transparent in ("true", "false"):
-                    slug = (
-                        f"L{layer}_du{du}_sd{sd}_sa{1 if sa == 'true' else 0}"
-                        f"_t{1 if transparent == 'true' else 0}_{sh_tag}"
-                    )
-                    layer_name = "nautical" if layer == "0" else "sonar"
-                    out.append(
-                        {
-                            "slug": slug,
-                            "layer": layer,
-                            "du": du,
-                            "sd": sd,
-                            "sa": sa,
-                            "transparent": transparent,
-                            "ugc": "false",
-                            "label": (
-                                f"{layer_name} | seabed={sa} | transparent={transparent} | "
-                                f"shallow={sh_tag} (du={du} sd={sd})"
-                            ),
-                        }
-                    )
+            slug = f"L{layer}_du{du}_sd{sd}_sa1_t0_{sh_tag}"
+            layer_name = "nautical" if layer == "0" else "sonar"
+            out.append(
+                {
+                    "slug": slug,
+                    "layer": layer,
+                    "du": du,
+                    "sd": sd,
+                    "sa": "true",
+                    "transparent": "false",
+                    "ugc": "false",
+                    "label": f"{layer_name} | shallow={sd} ft",
+                }
+            )
     return tuple(out)
 
 
@@ -534,7 +524,7 @@ def main() -> int:
         "--variants",
         choices=("all", "single"),
         default="all",
-        help="all: nautical+sonar x seabed x transparent x shallow presets (see SHALLOW_SHADING_PRESETS). "
+        help="all: nautical+sonar x feet shallow presets (see SHALLOW_SHADING_PRESETS). "
         "single: one query set via --layer/--du/--sd/--sa/--transparent.",
     )
     p.add_argument(

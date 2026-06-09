@@ -65,29 +65,16 @@
   </div>
   <div id="layout">
     <aside id="controls">
-      <div class="section-title">View</div>
-      <label class="row"><input type="radio" name="view" value="map" checked /><span>Map</span></label>
-      <label class="row"><input type="radio" name="view" value="heatmap" /><span>Heatmap</span></label>
-
       <div class="section-title">Chart type</div>
       <label class="row"><input type="radio" name="chart" value="nautical" checked /><span>Nautical charts</span></label>
-      <label class="row"><input type="radio" name="chart" value="sonar" /><span>SonarChart™ maps</span></label>
-
-      <div class="section-title">Seabed areas</div>
-      <label class="row"><input type="radio" name="seabed" value="show" checked /><span>Show</span></label>
-      <label class="row"><input type="radio" name="seabed" value="hide" /><span>Hide</span></label>
-
-      <div class="section-title">Depth units</div>
-      <label class="row"><input type="radio" name="depth" value="ft" /><span>Feet (ft)</span></label>
-      <label class="row"><input type="radio" name="depth" value="m" /><span>Meters (m)</span></label>
-      <label class="row"><input type="radio" name="depth" value="fath" checked /><span>Fathoms (fath)</span></label>
+      <label class="row"><input type="radio" name="chart" value="sonar" /><span>SonarChart maps</span></label>
 
       <div class="section-title" id="shallow-head">
         <span>Shallow band</span>
-        <span id="shallow-val">10 m</span>
+        <span id="shallow-val">10 ft</span>
       </div>
       <input type="range" id="shallow-range" min="0" max="2" step="1" value="0" />
-      <div class="range-ends"><span id="shallow-min-label">10 m</span><span id="shallow-max-label">5.5 fath</span></div>
+      <div class="range-ends"><span id="shallow-min-label">10 ft</span><span id="shallow-max-label">100 ft</span></div>
       <p id="no-tiles" style="display:none;">No downloaded tiles match this combination. Pick another option or re-run the downloader with those variants.</p>
     </aside>
     <div id="map-wrap"><div id="map"></div></div>
@@ -114,28 +101,23 @@
   }
 
   function readState() {
-    var view = document.querySelector('input[name="view"]:checked').value;
-    var transparent = view === 'heatmap' ? 'true' : 'false';
     var chart = document.querySelector('input[name="chart"]:checked').value;
     var layer = chart === 'nautical' ? '0' : '1';
-    var seabed = document.querySelector('input[name="seabed"]:checked').value;
-    var sa = seabed === 'show' ? 'true' : 'false';
-    var depth = document.querySelector('input[name="depth"]:checked').value;
-    var du = depth === 'ft' ? '2' : (depth === 'm' ? '1' : '3');
     var shallow = parseFloat(document.getElementById('shallow-range').value);
-    return { transparent: transparent, layer: layer, sa: sa, du: du, shallow: shallow, depth: depth };
+    return { transparent: 'false', layer: layer, sa: 'true', du: '2', shallow: shallow, depth: 'ft' };
   }
 
-  /** Suffix in tile folder slug, e.g. L0_du1_sd10_sa1_t1_sh_m10 → m10 */
+
+  /** Suffix in tile folder slug, e.g. L0_du2_sd33_sa1_t0_sh_ft33 -> ft33 */
   function shallowTagFromSlug(slug) {
     var m = String(slug).match(/_sh_(.+)$/);
     return m ? m[1] : '';
   }
 
-  var SHALLOW_ORDER = ['m10', 'ft33', 'fm55'];
-  var SHALLOW_LABEL = { m10: '10 m', ft33: '33 ft', fm55: '5.5 fath' };
+  var SHALLOW_ORDER = ['ft10', 'ft33', 'ft100'];
+  var SHALLOW_LABEL = { ft10: '10 ft', ft33: '33 ft', ft100: '100 ft' };
 
-  /** One row per downloaded shading pack for this chart + seabed + transparency + depth unit. */
+  /** One row per downloaded shading pack for this chart and feet shallow preset. */
   function orderedShallowVariants(st, ALL) {
     var cands = ALL.filter(function (v) {
       return v.transparent === st.transparent && v.layer === st.layer && v.sa === st.sa && v.du === st.du;
