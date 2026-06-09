@@ -7,15 +7,16 @@ WEST="${WEST:--180}"
 SOUTH="${SOUTH:--85.05112878}"
 EAST="${EAST:-180}"
 NORTH="${NORTH:-85.05112878}"
-ZOOM_MAX="${ZOOM_MAX:-6}"
+ZOOM_MAX="${ZOOM_MAX:-16}"
 ZOOM_MIN="${ZOOM_MIN:-0}"
 OUT_DIR="${OUT_DIR:-./tiles_store}"
 WORKERS="${WORKERS:-2}"
 DELAY="${DELAY:-0.01}"
 DELAY_JITTER="${DELAY_JITTER:-0.00}"
+DEDUPE_REPORT_INTERVAL="${DEDUPE_REPORT_INTERVAL:-60}"
 
 echo "Downloading whole-world bbox: $WEST $SOUTH $EAST $NORTH"
-echo "Zoom range: $ZOOM_MIN-$ZOOM_MAX. Increase ZOOM_MAX only carefully; whole world at z16 is enormous."
+echo "Zoom range: $ZOOM_MIN-$ZOOM_MAX."
 
 docker build -t "$IMAGE_NAME" .
 
@@ -31,4 +32,5 @@ docker run --rm -it \
   --out "$OUT_DIR" \
   --workers "$WORKERS" \
   --delay "$DELAY" \
-  --delay-jitter "$DELAY_JITTER"
+  --delay-jitter "$DELAY_JITTER" \
+  --dedupe-report-interval "$DEDUPE_REPORT_INTERVAL"

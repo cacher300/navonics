@@ -65,16 +65,12 @@
   </div>
   <div id="layout">
     <aside id="controls">
-      <div class="section-title">Chart type</div>
-      <label class="row"><input type="radio" name="chart" value="nautical" checked /><span>Nautical charts</span></label>
-      <label class="row"><input type="radio" name="chart" value="sonar" /><span>SonarChart maps</span></label>
-
       <div class="section-title" id="shallow-head">
         <span>Shallow band</span>
         <span id="shallow-val">10 ft</span>
       </div>
-      <input type="range" id="shallow-range" min="0" max="2" step="1" value="0" />
-      <div class="range-ends"><span id="shallow-min-label">10 ft</span><span id="shallow-max-label">100 ft</span></div>
+      <input type="range" id="shallow-range" min="0" max="0" step="1" value="0" disabled />
+      <div class="range-ends"><span id="shallow-min-label">10 ft</span><span id="shallow-max-label">10 ft</span></div>
       <p id="no-tiles" style="display:none;">No downloaded tiles match this combination. Pick another option or re-run the downloader with those variants.</p>
     </aside>
     <div id="map-wrap"><div id="map"></div></div>
@@ -101,10 +97,8 @@
   }
 
   function readState() {
-    var chart = document.querySelector('input[name="chart"]:checked').value;
-    var layer = chart === 'nautical' ? '0' : '1';
     var shallow = parseFloat(document.getElementById('shallow-range').value);
-    return { transparent: 'false', layer: layer, sa: 'true', du: '2', shallow: shallow, depth: 'ft' };
+    return { transparent: 'false', layer: '1', sa: 'true', du: '2', shallow: shallow, depth: 'ft' };
   }
 
 
@@ -114,8 +108,8 @@
     return m ? m[1] : '';
   }
 
-  var SHALLOW_ORDER = ['ft10', 'ft33', 'ft100'];
-  var SHALLOW_LABEL = { ft10: '10 ft', ft33: '33 ft', ft100: '100 ft' };
+  var SHALLOW_ORDER = ['ft10'];
+  var SHALLOW_LABEL = { ft10: '10 ft' };
 
   /** One row per downloaded shading pack for this chart and feet shallow preset. */
   function orderedShallowVariants(st, ALL) {

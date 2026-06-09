@@ -10,7 +10,7 @@ Tokens:
 Usage examples (PowerShell):
   python download_tiles.py --bbox -5.2 35.8 10.1 45.2 --zoom-min 10 --zoom-max 16 --out ./tiles_store
 
-  # Default: download nautical/sonar x feet shallow bands.
+  # Default: download sonar with 10 ft shallow shading.
   python download_tiles.py --refresh-tokens --anchor-tile 16/18322/24033 --margin 4 --zoom-min 16 --zoom-max 16 --out ./tiles_store
 
   # Single set of query params (legacy flat z/x/y under --out):
@@ -72,33 +72,30 @@ def iso_from_epoch(value: int) -> str:
     return dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
 
 
-# Feet-only shallow shading presets. du=2 is feet.
+# Default: sonar only, feet only, 10 ft shallow shading.
 SHALLOW_SHADING_PRESETS = (
     ("sh_ft10", "2", "10"),  # 0-10 ft
-    ("sh_ft33", "2", "33"),  # 0-33 ft
-    ("sh_ft100", "2", "100"),  # 0-100 ft
 )
 
 
 def build_variant_matrix():
-    """Default combinations: nautical/sonar x feet shallow presets."""
+    """Default combination: sonar with 10 ft shallow shading."""
     out = []
     for sh_tag, du, sd in SHALLOW_SHADING_PRESETS:
-        for layer in ("0", "1"):
-            slug = f"L{layer}_du{du}_sd{sd}_sa1_t0_{sh_tag}"
-            layer_name = "nautical" if layer == "0" else "sonar"
-            out.append(
-                {
-                    "slug": slug,
-                    "layer": layer,
-                    "du": du,
-                    "sd": sd,
-                    "sa": "true",
-                    "transparent": "false",
-                    "ugc": "false",
-                    "label": f"{layer_name} | shallow={sd} ft",
-                }
-            )
+        layer = "1"
+        slug = f"L{layer}_du{du}_sd{sd}_sa1_t0_{sh_tag}"
+        out.append(
+            {
+                "slug": slug,
+                "layer": layer,
+                "du": du,
+                "sd": sd,
+                "sa": "true",
+                "transparent": "false",
+                "ugc": "false",
+                "label": f"sonar | shallow={sd} ft",
+            }
+        )
     return tuple(out)
 
 
@@ -297,6 +294,87 @@ class TileContentCache:
             self.by_hash[digest] = final
             self.stats["indexed"] += 1
             return "stored"
+
+
+class DedupeReporter:
+    def __init__(self, content_cache: TileContentCache, report_path: Path, interval_s: float) -> None:
+        self.content_cache = content_cache
+        self.report_path = report_path
+        self.interval_s = max(0.0, interval_s)
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def start(self) -> None:
+        if self.interval_s <= 0:
+            self.write_report("disabled")
+            return
+        self.thread = threading.Thread(target=self.run, name="dedupe-reporter", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=max(1.0, min(self.interval_s, 10.0)))
+        self.write_report("final")
+
+    def run(self) -> None:
+        while not self.stop_event.wait(self.interval_s):
+            self.content_cache.scan_existing()
+            self.write_report("running")
+
+    def image_storage_stats(self) -> dict:
+        files = 0
+        apparent_bytes = 0
+        actual_bytes = 0
+        seen_inodes = set()
+        for path in self.content_cache.image_files() or ():
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            files += 1
+            apparent_bytes += st.st_size
+            key = (getattr(st, "st_dev", 0), getattr(st, "st_ino", str(path.resolve())))
+            if key not in seen_inodes:
+                seen_inodes.add(key)
+                actual_bytes += st.st_size
+        return {
+            "files": files,
+            "unique_storage_files": len(seen_inodes),
+            "apparent_bytes": apparent_bytes,
+            "actual_bytes": actual_bytes,
+            "saved_bytes": max(0, apparent_bytes - actual_bytes),
+        }
+
+    def fmt_bytes(self, n: int) -> str:
+        units = ("B", "KiB", "MiB", "GiB", "TiB")
+        val = float(n)
+        for unit in units:
+            if val < 1024 or unit == units[-1]:
+                return f"{val:.2f} {unit}"
+            val /= 1024
+        return f"{n} B"
+
+    def write_report(self, status: str) -> None:
+        storage = self.image_storage_stats()
+        with self.content_cache.lock:
+            cache_stats = dict(self.content_cache.stats)
+            unique_hashes = len(self.content_cache.by_hash)
+        lines = [
+            f"status: {status}",
+            f"updated_at: {dt.datetime.now(dt.timezone.utc).isoformat()}",
+            f"tile_files: {storage['files']}",
+            f"unique_storage_files: {storage['unique_storage_files']}",
+            f"unique_hashes_indexed: {unique_hashes}",
+            f"apparent_size: {self.fmt_bytes(storage['apparent_bytes'])} ({storage['apparent_bytes']} bytes)",
+            f"actual_size_after_hardlinks: {self.fmt_bytes(storage['actual_bytes'])} ({storage['actual_bytes']} bytes)",
+            f"estimated_storage_saved: {self.fmt_bytes(storage['saved_bytes'])} ({storage['saved_bytes']} bytes)",
+            f"dedupe_existing_replacements: {cache_stats.get('deduped_existing', 0)}",
+            f"hardlink_failed: {cache_stats.get('hardlink_failed', 0)}",
+        ]
+        tmp = self.report_path.with_suffix(self.report_path.suffix + ".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(self.report_path)
 
 
 class TileDownloader:
@@ -681,6 +759,18 @@ def main() -> int:
         action="store_true",
         help="Do not scan and hardlink duplicate tile images already present under --out.",
     )
+    p.add_argument(
+        "--dedupe-report-interval",
+        type=float,
+        default=300.0,
+        help="Seconds between background duplicate scans and storage-savings report updates. Use 0 to disable.",
+    )
+    p.add_argument(
+        "--dedupe-report",
+        type=Path,
+        default=None,
+        help="Path for duplicate-storage report text file (default: OUT/dedupe_report.txt).",
+    )
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
@@ -772,6 +862,10 @@ def main() -> int:
     print("Indexing existing tile images for duplicate-content cache...")
     content_cache.scan_existing()
     print(f"content cache: {content_cache.stats}")
+    report_path = args.dedupe_report or (args.out / "dedupe_report.txt")
+    dedupe_reporter = DedupeReporter(content_cache, report_path, args.dedupe_report_interval)
+    dedupe_reporter.write_report("starting")
+    dedupe_reporter.start()
 
     session = requests.Session()
     token_manager = TokenManager(
@@ -823,31 +917,35 @@ def main() -> int:
     # Keep only a small number of futures in memory (was: submit millions at once → huge RAM + slow start).
     max_in_flight = min(total_requests, max(workers * 8, 32))
     task_it = iter(iter_download_tasks(bbox, args.zoom_min, args.zoom_max, variants))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        pending = set()
-        done = 0
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            pending = set()
+            done = 0
 
-        def submit_next():
-            try:
-                v, z, x, y = next(task_it)
-            except StopIteration:
-                return False
-            pending.add(ex.submit(dl.fetch_one, v, z, x, y))
-            return True
+            def submit_next():
+                try:
+                    v, z, x, y = next(task_it)
+                except StopIteration:
+                    return False
+                pending.add(ex.submit(dl.fetch_one, v, z, x, y))
+                return True
 
-        while len(pending) < max_in_flight:
-            if not submit_next():
-                break
+            while len(pending) < max_in_flight:
+                if not submit_next():
+                    break
 
-        while pending:
-            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
-            done += len(finished)
-            for _ in finished:
-                submit_next()
-            if done % 200 == 0 or done == total_requests:
-                print(f"progress {done}/{total_requests}  stats={dl.stats}")
+            while pending:
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                done += len(finished)
+                for _ in finished:
+                    submit_next()
+                if done % 200 == 0 or done == total_requests:
+                    print(f"progress {done}/{total_requests}  stats={dl.stats}")
+    finally:
+        dedupe_reporter.stop()
 
     print("done:", dl.stats)
+    print(f"dedupe report: {report_path.resolve()}")
     print("Edit index.html beside download_tiles.py; each run copies it to --out.")
     print(f"  cd {args.out.resolve()}")
     print("  python -m http.server 8765")
