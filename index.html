@@ -135,10 +135,10 @@
   var SHALLOW_ORDER = ['m10', 'ft33', 'fm55'];
   var SHALLOW_LABEL = { m10: '10 m', ft33: '33 ft', fm55: '5.5 fath' };
 
-  /** One row per downloaded shading pack for this chart + seabed + transparency (ignores du). */
+  /** One row per downloaded shading pack for this chart + seabed + transparency + depth unit. */
   function orderedShallowVariants(st, ALL) {
     var cands = ALL.filter(function (v) {
-      return v.transparent === st.transparent && v.layer === st.layer && v.sa === st.sa;
+      return v.transparent === st.transparent && v.layer === st.layer && v.sa === st.sa && v.du === st.du;
     });
     var out = [];
     for (var t = 0; t < SHALLOW_ORDER.length; t++) {
@@ -151,18 +151,6 @@
       }
     }
     return out;
-  }
-
-  function setDepthUnitRadio(du, ignoreFlagHolder) {
-    var v = du === '2' ? 'ft' : (du === '1' ? 'm' : 'fath');
-    var el = document.querySelector('input[name="depth"][value="' + v + '"]');
-    if (!el || el.checked) return;
-    if (ignoreFlagHolder) ignoreFlagHolder.v = true;
-    try {
-      el.checked = true;
-    } finally {
-      if (ignoreFlagHolder) ignoreFlagHolder.v = false;
-    }
   }
 
   function startApp(manifest) {
@@ -206,8 +194,6 @@
   }
 
   function main(ALL, zMin, zMax, bounds) {
-    var ignoreDepthRadio = { v: false };
-
     var map = L.map('map', {
       minZoom: zMin,
       maxZoom: zMax,
@@ -275,7 +261,6 @@
       if (isNaN(idx)) idx = 0;
       idx = Math.min(ordered.length - 1, Math.max(0, idx));
       var v = ordered[idx];
-      setDepthUnitRadio(v.du, ignoreDepthRadio);
       warn.style.display = 'none';
       var url = tileUrlTemplate(v.slug);
       if (tileLayer) map.removeLayer(tileLayer);
@@ -291,7 +276,6 @@
     function wireControls() {
       document.querySelectorAll('#controls input[type=radio]').forEach(function (el) {
         el.addEventListener('change', function () {
-          if (ignoreDepthRadio.v) return;
           syncShallowSliderToData();
           applyLayer();
         });
@@ -301,7 +285,6 @@
         var ordered = orderedShallowVariants(st, ALL);
         var r = document.getElementById('shallow-range');
         var idx = parseInt(r.value, 10);
-        if (!isNaN(idx) && ordered[idx]) setDepthUnitRadio(ordered[idx].du, ignoreDepthRadio);
         updateShallowPresetLabel(ALL);
         applyLayer();
       });
