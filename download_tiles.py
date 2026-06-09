@@ -144,7 +144,7 @@ def iter_jobs(
     zoom_min: int,
     zoom_max: int,
 ) -> Iterator[Tuple[int, int, int]]:
-    for z in range(zoom_min, zoom_max + 1):
+    for z in range(zoom_max, zoom_min - 1, -1):
         xmin, ymin, xmax, ymax = bbox_to_xy_range(bbox, z)
         for x in range(xmin, xmax + 1):
             for y in range(ymin, ymax + 1):

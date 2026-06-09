@@ -1,17 +1,28 @@
 #!/usr/bin/env sh
 set -eu
 
+# Edit these few values if you want a different area or output folder.
 IMAGE_NAME="${IMAGE_NAME:-navonics-downloader}"
-CONTAINER_WORKDIR="/app"
+ANCHOR_TILE="${ANCHOR_TILE:-16/18322/24033}"
+MARGIN="${MARGIN:-4}"
+ZOOM_MAX="${ZOOM_MAX:-16}"
+ZOOM_MIN="${ZOOM_MIN:-0}"
+OUT_DIR="${OUT_DIR:-./tiles_store}"
+WORKERS="${WORKERS:-4}"
+DELAY="${DELAY:-0.05}"
 
 docker build -t "$IMAGE_NAME" .
 
-if [ "$#" -eq 0 ]; then
-  set -- --help
-fi
-
 docker run --rm -it \
   --shm-size=1g \
-  -v "$(pwd):$CONTAINER_WORKDIR" \
-  -w "$CONTAINER_WORKDIR" \
-  "$IMAGE_NAME" "$@"
+  -v "$(pwd):/app" \
+  -w /app \
+  "$IMAGE_NAME" \
+  --refresh-headless \
+  --anchor-tile "$ANCHOR_TILE" \
+  --margin "$MARGIN" \
+  --zoom-min "$ZOOM_MIN" \
+  --zoom-max "$ZOOM_MAX" \
+  --out "$OUT_DIR" \
+  --workers "$WORKERS" \
+  --delay "$DELAY"
