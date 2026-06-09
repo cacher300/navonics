@@ -519,7 +519,7 @@ def main() -> int:
     p.add_argument(
         "--delay",
         type=float,
-        default=0.15,
+        default=0.01,
         help="Minimum seconds between request starts across all workers.",
     )
     p.add_argument(
