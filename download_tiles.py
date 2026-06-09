@@ -27,6 +27,7 @@ Notes:
 import argparse
 import base64
 import datetime as dt
+import hashlib
 import itertools
 import json
 import math
@@ -51,6 +52,7 @@ DEFAULT_NAVIONICS_CONFIG = (
     "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJycG4iOiJpbnRlcm5hbF9zZXJ2aWNlIiwiYXByIjoiMDEwLUQyMTEyLTEwIn0.Ua7QtpbvTn16y9WDFnzUSiTCzjQbltqcBFAkiFv1PEY"
 )
 DEFAULT_TOKEN_CACHE = Path(".navionics_tokens.json")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 BBox = Tuple[float, float, float, float]  # west, south, east, north
 
@@ -212,6 +214,91 @@ def build_url(
     return template.format(z=z, x=x, y=y) + "?" + q
 
 
+class TileContentCache:
+    def __init__(self, root: Path, dedupe_existing: bool) -> None:
+        self.root = root
+        self.dedupe_existing = dedupe_existing
+        self.lock = threading.Lock()
+        self.by_hash = {}
+        self.stats = {"indexed": 0, "deduped_existing": 0, "hardlink_failed": 0}
+
+    def digest_bytes(self, content: bytes) -> str:
+        return hashlib.sha256(content).hexdigest()
+
+    def digest_file(self, path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def image_files(self):
+        if not self.root.is_dir():
+            return
+        for p in self.root.rglob("*"):
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                yield p
+
+    def same_file(self, a: Path, b: Path) -> bool:
+        try:
+            return os.path.samefile(a, b)
+        except OSError:
+            return False
+
+    def hardlink_replace(self, src: Path, dst: Path) -> bool:
+        if self.same_file(src, dst):
+            return True
+        tmp = dst.with_name(f"{dst.name}.link_tmp")
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(src, tmp)
+            tmp.replace(dst)
+            return True
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            return False
+
+    def scan_existing(self) -> None:
+        for path in self.image_files() or ():
+            try:
+                digest = self.digest_file(path)
+            except OSError:
+                continue
+            with self.lock:
+                canonical = self.by_hash.get(digest)
+                if canonical is None or not canonical.is_file():
+                    self.by_hash[digest] = path
+                    self.stats["indexed"] += 1
+                    continue
+            if self.dedupe_existing:
+                if self.hardlink_replace(canonical, path):
+                    with self.lock:
+                        self.stats["deduped_existing"] += 1
+                else:
+                    with self.lock:
+                        self.stats["hardlink_failed"] += 1
+
+    def put(self, content: bytes, ext: str, final: Path, tmp_path: Path) -> str:
+        digest = self.digest_bytes(content)
+        with self.lock:
+            canonical = self.by_hash.get(digest)
+            if canonical is not None and not canonical.is_file():
+                canonical = None
+                self.by_hash.pop(digest, None)
+            if canonical is not None:
+                if self.hardlink_replace(canonical, final):
+                    return "cached"
+                tmp_path.write_bytes(content)
+                tmp_path.replace(final)
+                return "copy"
+
+            tmp_path.write_bytes(content)
+            tmp_path.replace(final)
+            self.by_hash[digest] = final
+            self.stats["indexed"] += 1
+            return "stored"
+
+
 class TileDownloader:
     def __init__(
         self,
@@ -223,6 +310,7 @@ class TileDownloader:
         delay_s: float,
         delay_jitter_s: float,
         lock: threading.Lock,
+        content_cache: TileContentCache,
         token_manager,
         auth_retries: int,
     ) -> None:
@@ -234,11 +322,21 @@ class TileDownloader:
         self.delay_s = delay_s
         self.delay_jitter_s = max(0.0, delay_jitter_s)
         self.lock = lock
+        self.content_cache = content_cache
         self.throttle_lock = threading.Lock()
         self.next_request_at = 0.0
         self.token_manager = token_manager
         self.auth_retries = max(0, auth_retries)
-        self.stats = {"ok": 0, "skip": 0, "forbidden": 0, "fail": 0, "retry": 0, "auth_refresh": 0}
+        self.stats = {
+            "ok": 0,
+            "cached": 0,
+            "cache_copy": 0,
+            "skip": 0,
+            "forbidden": 0,
+            "fail": 0,
+            "retry": 0,
+            "auth_refresh": 0,
+        }
 
     def wait_for_rate_limit_slot(self) -> None:
         delay = max(0.0, self.delay_s) + random.uniform(0.0, self.delay_jitter_s)
@@ -337,12 +435,14 @@ class TileDownloader:
 
         final = ext_dir / f"{y}{ext}"
         tmp = path_unknown
-        tmp.write_bytes(r.content)
-        if final.exists():
-            final.unlink()
-        tmp.replace(final)
+        cache_result = self.content_cache.put(r.content, ext, final, tmp)
         with self.lock:
-            self.stats["ok"] += 1
+            if cache_result == "cached":
+                self.stats["cached"] += 1
+            elif cache_result == "copy":
+                self.stats["cache_copy"] += 1
+            else:
+                self.stats["ok"] += 1
 
 
 def write_manifest(
@@ -576,6 +676,11 @@ def main() -> int:
         default=2,
         help="Retries per tile after refreshing tokens for auth failures.",
     )
+    p.add_argument(
+        "--no-dedupe-existing",
+        action="store_true",
+        help="Do not scan and hardlink duplicate tile images already present under --out.",
+    )
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
@@ -663,6 +768,11 @@ def main() -> int:
     write_manifest(args.out, bbox, args.zoom_min, args.zoom_max, variants)
     copy_tile_index(args.out)
 
+    content_cache = TileContentCache(args.out, dedupe_existing=not args.no_dedupe_existing)
+    print("Indexing existing tile images for duplicate-content cache...")
+    content_cache.scan_existing()
+    print(f"content cache: {content_cache.stats}")
+
     session = requests.Session()
     token_manager = TokenManager(
         bearer=bearer,
@@ -704,6 +814,7 @@ def main() -> int:
         args.delay,
         args.delay_jitter,
         lock,
+        content_cache,
         token_manager,
         args.auth_retries,
     )

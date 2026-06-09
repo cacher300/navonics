@@ -176,9 +176,11 @@
   }
 
   function main(ALL, zMin, zMax, bounds) {
+    var displayMaxZoom = Math.max(zMax, 18);
+
     var map = L.map('map', {
       minZoom: zMin,
-      maxZoom: zMax,
+      maxZoom: displayMaxZoom,
       worldCopyJump: true
     });
     map.fitBounds(bounds, { maxZoom: zMax });
@@ -248,7 +250,7 @@
       if (tileLayer) map.removeLayer(tileLayer);
       tileLayer = L.tileLayer(url, {
         minZoom: zMin,
-        maxZoom: zMax,
+        maxZoom: displayMaxZoom,
         maxNativeZoom: zMax,
         tms: false,
         noWrap: false
@@ -276,7 +278,7 @@
       document.getElementById('controls').style.display = 'none';
       document.getElementById('map-wrap').style.flex = '1 1 100%';
       L.tileLayer(tileUrlTemplate(ALL[0] ? ALL[0].slug : ''), {
-        minZoom: zMin, maxZoom: zMax, maxNativeZoom: zMax, tms: false, noWrap: false
+        minZoom: zMin, maxZoom: displayMaxZoom, maxNativeZoom: zMax, tms: false, noWrap: false
       }).addTo(map);
     } else {
       wireControls();
