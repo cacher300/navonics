@@ -480,16 +480,7 @@ class TileDownloader:
             if r.status_code == 429:
                 with self.lock:
                     self.stats["rate_limited"] += 1
-                    self.stats["retry"] += 1
-                retry_after = r.headers.get("Retry-After")
-                try:
-                    wait_s = float(retry_after) if retry_after else 0.0
-                except ValueError:
-                    wait_s = 0.0
-                if wait_s <= 0:
-                    wait_s = min(60.0, 2.0 * (2**attempt)) + random.uniform(0.0, 1.0)
-                time.sleep(wait_s)
-                continue
+                break
             if r.status_code == 403 and not self.token_manager.bearer_expires_soon():
                 break
             if r.status_code != 401 and r.status_code != 403:
@@ -932,18 +923,23 @@ def main() -> int:
     workers = max(1, args.workers)
     # Keep only a small number of futures in memory (was: submit millions at once → huge RAM + slow start).
     max_in_flight = min(total_requests, max(workers * 8, 32))
+    print(f"Starting downloads with workers={workers}, max_in_flight={max_in_flight}")
     task_it = iter(iter_download_tasks(bbox, args.zoom_min, args.zoom_max, variants))
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             pending = set()
             done = 0
+            submitted = 0
+            last_heartbeat = time.monotonic()
 
             def submit_next():
+                nonlocal submitted
                 try:
                     v, z, x, y = next(task_it)
                 except StopIteration:
                     return False
                 pending.add(ex.submit(dl.fetch_one, v, z, x, y))
+                submitted += 1
                 return True
 
             while len(pending) < max_in_flight:
@@ -951,7 +947,16 @@ def main() -> int:
                     break
 
             while pending:
-                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                finished, pending = wait(pending, timeout=30, return_when=FIRST_COMPLETED)
+                if not finished:
+                    now = time.monotonic()
+                    if now - last_heartbeat >= 30:
+                        print(
+                            f"heartbeat completed={done}/{total_requests} "
+                            f"submitted={submitted} pending={len(pending)} stats={dl.stats}"
+                        )
+                        last_heartbeat = now
+                    continue
                 done += len(finished)
                 for _ in finished:
                     submit_next()

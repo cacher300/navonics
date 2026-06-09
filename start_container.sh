@@ -20,7 +20,7 @@ echo "Downloading whole-world bbox: $WEST $SOUTH $EAST $NORTH"
 echo "Zoom range: $ZOOM_MIN-$ZOOM_MAX."
 echo "Mode: sonar only, feet only, 10 ft shallow shading."
 
-docker build --no-cache -t "$IMAGE_NAME" .
+docker build -t "$IMAGE_NAME" .
 
 docker run --rm -it \
   --shm-size=1g \
