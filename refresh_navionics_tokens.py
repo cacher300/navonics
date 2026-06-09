@@ -63,6 +63,10 @@ def best_chrome_binary() -> str:
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
     )
     for candidate in candidates:
         if Path(candidate).is_file():
@@ -103,6 +107,8 @@ def refresh_tokens(args) -> dict:
     options.set_capability("goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"})
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--no-sandbox")
     options.add_argument("--window-size=390,844")
     options.add_argument(f"--user-agent={args.user_agent}")
     if args.headless:
